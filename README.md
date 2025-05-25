@@ -7,7 +7,7 @@ A lightweight, transparent proxy server for the OpenAI API that logs and forward
 - Proxies all requests to the OpenAI API
 - Detailed logging of requests and responses
 - Support for streaming responses (SSE)
-- Configurable via environment variables
+- Configurable via command-line flags or environment variables
 - Minimal dependencies (only uses Go standard library and godotenv)
 
 ## Installation
@@ -41,21 +41,51 @@ cp .env.example .env
 
 ## Configuration
 
-The proxy can be configured using environment variables:
+The proxy can be configured using command-line flags or environment variables. Command-line flags take precedence over environment variables.
+
+### Command-line Flags
+
+```
+  -port, -p string
+        Port for the proxy server to listen on
+  -url, -u string
+        Base URL for the OpenAI API
+  -key, -k string
+        Your OpenAI API key
+  -req, -r
+        Enable request logging (default true)
+  -resp, -s
+        Enable response logging (default true)
+  -stdout, -o
+        Log to standard output (default true)
+  -file, -f string
+        File to log requests and responses
+```
+
+### Environment Variables
 
 | Variable | Description | Default |
-|----------|-------------|---------|
+|----------|-------------|----------|
 | `OPENAI_BASE_URL` | Base URL for the OpenAI API | `https://api.openai.com/v1` |
 | `OPENAI_API_KEY` | Your OpenAI API key | - |
 | `PORT` | Port for the proxy server to listen on | `8080` |
-| `REQUEST_LOG_FILE` | File to log requests and responses (optional) | - |
+| `LOG_REQUESTS` | Enable request logging | `true` |
+| `LOG_RESPONSES` | Enable response logging | `true` |
+| `LOG_TO_STDOUT` | Log to standard output | `true` |
+| `REQUEST_LOG_FILE` | File to log requests and responses | - |
 
 ## Usage
 
-1. Start the proxy server:
+1. Start the proxy server with default settings:
 
 ```bash
 go run main.go
+```
+
+Or with custom configuration via command-line flags (using the shorter options):
+
+```bash
+go run main.go -p 9000 -k your_api_key -f api_logs.txt
 ```
 
 2. Configure your OpenAI client to use the proxy by setting the base URL to `http://localhost:8080` (or whatever port you configured).

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -24,14 +25,12 @@ type Config struct {
 	RequestLogFile string
 }
 
-// RequestLogger logs HTTP requests and responses
 type RequestLogger struct {
 	LogFile     *os.File
 	LogToFile   bool
 	LogToStdout bool
 }
 
-// NewRequestLogger creates a new request logger
 func NewRequestLogger(logFile string, logToStdout bool) (*RequestLogger, error) {
 	logger := &RequestLogger{
 		LogToStdout: logToStdout,
@@ -49,14 +48,12 @@ func NewRequestLogger(logFile string, logToStdout bool) (*RequestLogger, error) 
 	return logger, nil
 }
 
-// Close closes the log file
 func (l *RequestLogger) Close() {
 	if l.LogFile != nil {
 		l.LogFile.Close()
 	}
 }
 
-// LogRequest logs an HTTP request
 func (l *RequestLogger) LogRequest(r *http.Request, body []byte) {
 	timestamp := time.Now().Format(time.RFC3339)
 	reqID := r.Header.Get("X-Request-ID")
@@ -100,7 +97,6 @@ func (l *RequestLogger) LogRequest(r *http.Request, body []byte) {
 	}
 }
 
-// LogResponse logs an HTTP response
 func (l *RequestLogger) LogResponse(reqID string, resp *http.Response, body []byte) {
 	timestamp := time.Now().Format(time.RFC3339)
 
@@ -147,13 +143,11 @@ func (l *RequestLogger) LogResponse(reqID string, resp *http.Response, body []by
 	}
 }
 
-// ProxyServer is an OpenAI API proxy server
 type ProxyServer struct {
 	Config Config
 	Logger *RequestLogger
 }
 
-// NewProxyServer creates a new proxy server
 func NewProxyServer(config Config) (*ProxyServer, error) {
 	logger, err := NewRequestLogger(config.RequestLogFile, config.LogToStdout)
 	if err != nil {
@@ -166,14 +160,12 @@ func NewProxyServer(config Config) (*ProxyServer, error) {
 	}, nil
 }
 
-// Close closes resources used by the proxy server
 func (s *ProxyServer) Close() {
 	if s.Logger != nil {
 		s.Logger.Close()
 	}
 }
 
-// ServeHTTP handles HTTP requests to the proxy server
 func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Generate a request ID if not present
 	reqID := r.Header.Get("X-Request-ID")
@@ -303,10 +295,40 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func loadConfig() Config {
-	// Load environment variables from .env file
-	_ = godotenv.Load() // Ignore error if .env file doesn't exist
+	var config Config
 
-	// Parse boolean environment variables
+	var flagLogRequests, flagLogResponses, flagLogToStdout bool
+	var flagsSet bool
+
+	flag.StringVar(&config.Port, "port", "", "Port for the proxy server to listen on")
+	flag.StringVar(&config.Port, "p", "", "Port for the proxy server to listen on (shorthand)")
+	
+	flag.StringVar(&config.OpenAIBaseURL, "url", "", "Base URL for the OpenAI API")
+	flag.StringVar(&config.OpenAIBaseURL, "u", "", "Base URL for the OpenAI API (shorthand)")
+	
+	flag.StringVar(&config.OpenAIAPIKey, "key", "", "Your OpenAI API key")
+	flag.StringVar(&config.OpenAIAPIKey, "k", "", "Your OpenAI API key (shorthand)")
+	
+	flag.BoolVar(&flagLogRequests, "req", true, "Enable request logging")
+	flag.BoolVar(&flagLogRequests, "r", true, "Enable request logging (shorthand)")
+	
+	flag.BoolVar(&flagLogResponses, "resp", true, "Enable response logging")
+	flag.BoolVar(&flagLogResponses, "s", true, "Enable response logging (shorthand)")
+	
+	flag.BoolVar(&flagLogToStdout, "stdout", true, "Log to standard output")
+	flag.BoolVar(&flagLogToStdout, "o", true, "Log to standard output (shorthand)")
+	
+	flag.StringVar(&config.RequestLogFile, "file", "", "File to log requests and responses")
+	flag.StringVar(&config.RequestLogFile, "f", "", "File to log requests and responses (shorthand)")
+
+	flag.Visit(func(f *flag.Flag) {
+		flagsSet = true
+	})
+
+	flag.Parse()
+
+	_ = godotenv.Load()
+
 	parseBool := func(envVar string, defaultVal bool) bool {
 		val := os.Getenv(envVar)
 		if val == "" {
@@ -320,18 +342,32 @@ func loadConfig() Config {
 		return boolVal
 	}
 
-	// Get configuration from environment
-	config := Config{
-		Port:           os.Getenv("PORT"),
-		OpenAIBaseURL:  os.Getenv("OPENAI_BASE_URL"),
-		OpenAIAPIKey:   os.Getenv("OPENAI_API_KEY"),
-		LogRequests:    parseBool("LOG_REQUESTS", true),
-		LogResponses:   parseBool("LOG_RESPONSES", true),
-		LogToStdout:    parseBool("LOG_TO_STDOUT", true),
-		RequestLogFile: os.Getenv("REQUEST_LOG_FILE"),
+	if envPort := os.Getenv("PORT"); envPort != "" && config.Port == "" {
+		config.Port = envPort
+	}
+	
+	if envURL := os.Getenv("OPENAI_BASE_URL"); envURL != "" && config.OpenAIBaseURL == "" {
+		config.OpenAIBaseURL = envURL
+	}
+	
+	if envKey := os.Getenv("OPENAI_API_KEY"); envKey != "" && config.OpenAIAPIKey == "" {
+		config.OpenAIAPIKey = envKey
 	}
 
-	// Set defaults
+	config.LogRequests = flagLogRequests
+	config.LogResponses = flagLogResponses
+	config.LogToStdout = flagLogToStdout
+	
+	if !flagsSet {
+		config.LogRequests = parseBool("LOG_REQUESTS", config.LogRequests)
+		config.LogResponses = parseBool("LOG_RESPONSES", config.LogResponses)
+		config.LogToStdout = parseBool("LOG_TO_STDOUT", config.LogToStdout)
+	}
+	
+	if envLogFile := os.Getenv("REQUEST_LOG_FILE"); envLogFile != "" && config.RequestLogFile == "" {
+		config.RequestLogFile = envLogFile
+	}
+
 	if config.Port == "" {
 		config.Port = "8080"
 	}
@@ -339,7 +375,6 @@ func loadConfig() Config {
 	if config.OpenAIBaseURL == "" {
 		config.OpenAIBaseURL = "https://api.openai.com/v1"
 	} else {
-		// Ensure the base URL doesn't end with a slash
 		config.OpenAIBaseURL = strings.TrimSuffix(config.OpenAIBaseURL, "/")
 	}
 
@@ -347,17 +382,14 @@ func loadConfig() Config {
 }
 
 func main() {
-	// Load configuration
 	config := loadConfig()
 
-	// Create proxy server
 	server, err := NewProxyServer(config)
 	if err != nil {
 		log.Fatalf("Failed to create proxy server: %v", err)
 	}
 	defer server.Close()
 
-	// Create HTTP server
 	httpServer := &http.Server{
 		Addr:         ":" + config.Port,
 		Handler:      server,
@@ -366,14 +398,12 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Log server start
 	log.Printf("Starting OpenAI API proxy server on port %s", config.Port)
 	log.Printf("Forwarding requests to %s", config.OpenAIBaseURL)
 	log.Printf("Logging: requests=%v, responses=%v, to_stdout=%v, log_file=%s",
 		config.LogRequests, config.LogResponses, config.LogToStdout,
 		config.RequestLogFile)
 
-	// Start server
 	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
