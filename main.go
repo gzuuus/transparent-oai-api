@@ -26,14 +26,16 @@ type Config struct {
 }
 
 type RequestLogger struct {
-	LogFile     *os.File
-	LogToFile   bool
-	LogToStdout bool
+	LogFile      *os.File
+	LogToFile    bool
+	LogToStdout  bool
+	requestTimes map[string]time.Time
 }
 
 func NewRequestLogger(logFile string, logToStdout bool) (*RequestLogger, error) {
 	logger := &RequestLogger{
-		LogToStdout: logToStdout,
+		LogToStdout:  logToStdout,
+		requestTimes: make(map[string]time.Time),
 	}
 
 	if logFile != "" {
@@ -55,20 +57,21 @@ func (l *RequestLogger) Close() {
 }
 
 func (l *RequestLogger) LogRequest(r *http.Request, body []byte) {
-	timestamp := time.Now().Format(time.RFC3339)
+	now := time.Now()
+	timestamp := now.Format(time.RFC3339)
 	reqID := r.Header.Get("X-Request-ID")
 	if reqID == "" {
-		reqID = fmt.Sprintf("req-%d", time.Now().UnixNano())
+		reqID = fmt.Sprintf("req-%d", now.UnixNano())
 	}
+
+	l.requestTimes[reqID] = now
 
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "==== REQUEST [%s] %s ====\n", reqID, timestamp)
 	fmt.Fprintf(&buf, "%s %s %s\n", r.Method, r.URL.Path, r.Proto)
 
-	// Log headers
 	fmt.Fprintln(&buf, "Headers:")
 	for name, values := range r.Header {
-		// Skip Authorization header content for security
 		if strings.ToLower(name) == "authorization" {
 			fmt.Fprintf(&buf, "  %s: Bearer [REDACTED]\n", name)
 			continue
@@ -78,7 +81,6 @@ func (l *RequestLogger) LogRequest(r *http.Request, body []byte) {
 		}
 	}
 
-	// Log body if present
 	if len(body) > 0 {
 		fmt.Fprintln(&buf, "Body:")
 		fmt.Fprintln(&buf, string(body))
@@ -86,25 +88,31 @@ func (l *RequestLogger) LogRequest(r *http.Request, body []byte) {
 
 	logData := buf.String()
 
-	// Write to file if configured
 	if l.LogToFile && l.LogFile != nil {
 		fmt.Fprintln(l.LogFile, logData)
 	}
 
-	// Write to stdout if configured
 	if l.LogToStdout {
 		fmt.Print(logData)
 	}
 }
 
 func (l *RequestLogger) LogResponse(reqID string, resp *http.Response, body []byte) {
-	timestamp := time.Now().Format(time.RFC3339)
+	now := time.Now()
+	timestamp := now.Format(time.RFC3339)
+
+	var latency time.Duration
+	latencyStr := "unknown"
+	if requestTime, ok := l.requestTimes[reqID]; ok {
+		latency = now.Sub(requestTime)
+		latencyStr = latency.String()
+		delete(l.requestTimes, reqID)
+	}
 
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "==== RESPONSE [%s] %s ====\n", reqID, timestamp)
+	fmt.Fprintf(&buf, "==== RESPONSE [%s] %s (Latency: %s) ====\n", reqID, timestamp, latencyStr)
 	fmt.Fprintf(&buf, "%s %s\n", resp.Proto, resp.Status)
 
-	// Log headers
 	fmt.Fprintln(&buf, "Headers:")
 	for name, values := range resp.Header {
 		for _, value := range values {
@@ -112,10 +120,8 @@ func (l *RequestLogger) LogResponse(reqID string, resp *http.Response, body []by
 		}
 	}
 
-	// Log body if present and not too large
 	if len(body) > 0 {
-		// Limit body size for logging to prevent huge logs
-		maxBodySize := 10000 // 10KB
+		maxBodySize := 10000
 		bodyToLog := body
 		if len(body) > maxBodySize {
 			bodyToLog = body[:maxBodySize]
@@ -132,12 +138,9 @@ func (l *RequestLogger) LogResponse(reqID string, resp *http.Response, body []by
 
 	logData := buf.String()
 
-	// Write to file if configured
 	if l.LogToFile && l.LogFile != nil {
 		fmt.Fprintln(l.LogFile, logData)
 	}
-
-	// Write to stdout if configured
 	if l.LogToStdout {
 		fmt.Print(logData)
 	}
@@ -167,14 +170,12 @@ func (s *ProxyServer) Close() {
 }
 
 func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Generate a request ID if not present
 	reqID := r.Header.Get("X-Request-ID")
 	if reqID == "" {
 		reqID = fmt.Sprintf("req-%d", time.Now().UnixNano())
 		r.Header.Set("X-Request-ID", reqID)
 	}
 
-	// Read the request body
 	var bodyBytes []byte
 	var err error
 
@@ -188,12 +189,10 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 	}
 
-	// Log the request if enabled
 	if s.Config.LogRequests {
 		s.Logger.LogRequest(r, bodyBytes)
 	}
 
-	// Create a new request to forward to the OpenAI API
 	targetURL := s.Config.OpenAIBaseURL + r.URL.Path
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
@@ -205,7 +204,6 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copy headers from original request
 	for name, values := range r.Header {
 		if strings.ToLower(name) == "host" {
 			continue
@@ -215,17 +213,13 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Set API key if not provided in the request
 	if proxyReq.Header.Get("Authorization") == "" && s.Config.OpenAIAPIKey != "" {
 		proxyReq.Header.Set("Authorization", "Bearer "+s.Config.OpenAIAPIKey)
 	}
-
-	// Create HTTP client with appropriate timeouts
 	client := &http.Client{
 		Timeout: 120 * time.Second,
 	}
 
-	// Make the request to the OpenAI API
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		http.Error(w, "Error forwarding request to OpenAI API: "+err.Error(), http.StatusBadGateway)
@@ -233,17 +227,14 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Copy response headers
 	for name, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(name, value)
 		}
 	}
 
-	// Set response status code
 	w.WriteHeader(resp.StatusCode)
 
-	// Handle streaming responses differently
 	isStreaming := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 
 	if isStreaming {
@@ -278,7 +269,6 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			io.Copy(w, resp.Body)
 		}
 	} else {
-		// For non-streaming responses
 		responseBody, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("Error reading response body: %v", err)
@@ -302,22 +292,22 @@ func loadConfig() Config {
 
 	flag.StringVar(&config.Port, "port", "", "Port for the proxy server to listen on")
 	flag.StringVar(&config.Port, "p", "", "Port for the proxy server to listen on (shorthand)")
-	
+
 	flag.StringVar(&config.OpenAIBaseURL, "url", "", "Base URL for the OpenAI API")
 	flag.StringVar(&config.OpenAIBaseURL, "u", "", "Base URL for the OpenAI API (shorthand)")
-	
+
 	flag.StringVar(&config.OpenAIAPIKey, "key", "", "Your OpenAI API key")
 	flag.StringVar(&config.OpenAIAPIKey, "k", "", "Your OpenAI API key (shorthand)")
-	
+
 	flag.BoolVar(&flagLogRequests, "req", true, "Enable request logging")
 	flag.BoolVar(&flagLogRequests, "r", true, "Enable request logging (shorthand)")
-	
+
 	flag.BoolVar(&flagLogResponses, "resp", true, "Enable response logging")
 	flag.BoolVar(&flagLogResponses, "s", true, "Enable response logging (shorthand)")
-	
+
 	flag.BoolVar(&flagLogToStdout, "stdout", true, "Log to standard output")
 	flag.BoolVar(&flagLogToStdout, "o", true, "Log to standard output (shorthand)")
-	
+
 	flag.StringVar(&config.RequestLogFile, "file", "", "File to log requests and responses")
 	flag.StringVar(&config.RequestLogFile, "f", "", "File to log requests and responses (shorthand)")
 
@@ -345,11 +335,11 @@ func loadConfig() Config {
 	if envPort := os.Getenv("PORT"); envPort != "" && config.Port == "" {
 		config.Port = envPort
 	}
-	
+
 	if envURL := os.Getenv("OPENAI_BASE_URL"); envURL != "" && config.OpenAIBaseURL == "" {
 		config.OpenAIBaseURL = envURL
 	}
-	
+
 	if envKey := os.Getenv("OPENAI_API_KEY"); envKey != "" && config.OpenAIAPIKey == "" {
 		config.OpenAIAPIKey = envKey
 	}
@@ -357,13 +347,13 @@ func loadConfig() Config {
 	config.LogRequests = flagLogRequests
 	config.LogResponses = flagLogResponses
 	config.LogToStdout = flagLogToStdout
-	
+
 	if !flagsSet {
 		config.LogRequests = parseBool("LOG_REQUESTS", config.LogRequests)
 		config.LogResponses = parseBool("LOG_RESPONSES", config.LogResponses)
 		config.LogToStdout = parseBool("LOG_TO_STDOUT", config.LogToStdout)
 	}
-	
+
 	if envLogFile := os.Getenv("REQUEST_LOG_FILE"); envLogFile != "" && config.RequestLogFile == "" {
 		config.RequestLogFile = envLogFile
 	}
